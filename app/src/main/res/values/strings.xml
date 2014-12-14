@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <string name="app_name">Strive</string>
+    <string name="toggle">Record</string>
+
+    <string name="distance_cero">0.0</string>
+    <string name="error_play_services">We could not find Google Play Services</string>
+
+</resources>
