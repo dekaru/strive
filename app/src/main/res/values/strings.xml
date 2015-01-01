@@ -3,11 +3,14 @@
 
     <string name="app_name">Strive</string>
     <string name="toggle">Record</string>
-
+    <string name="tracking">Strive is now tracking your activity.</string>
     <string name="distance_cero">0.00 km.</string>
-
     <string name="location_waiting">Waiting for location…</string>
     <string name="error_play_services">We could not find Google Play Services</string>
     <string name="broadcast_name">strive-service-location-update</string>
+
+
+    <string name="hello_world">Hello world!</string>
+    <string name="action_settings">Settings</string>
 
 </resources>

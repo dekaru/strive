@@ -88,6 +88,8 @@ public class MapsActivity extends FragmentActivity implements
     protected void onResume() {
         super.onStart();
 
+        // TODO if activity was killed but service is still running, should update UI
+
         // connect the client
         mGoogleApiClient.connect();
     }
@@ -96,6 +98,8 @@ public class MapsActivity extends FragmentActivity implements
     protected void onPause() {
         // disconnect the client
         mGoogleApiClient.disconnect();
+
+        // TODO should unregisterReceiver?
 
         super.onPause();
     }
@@ -114,21 +118,25 @@ public class MapsActivity extends FragmentActivity implements
 
     @Override
     public boolean onMenuItemSelected(int featureId, MenuItem item) {
-        if (item.getItemId() == R.id.toggle) {
-            if (isTracking) {
-                // stop recording
-                stopTrackingService();
-                isTracking = false;
-                item.setIcon(R.drawable.ic_play_black);
-            } else {
-                // start recording
-                startTrackingService();
-                isTracking = true;
-                item.setIcon(R.drawable.ic_pause_black);
+        switch (item.getItemId()) {
+            case (R.id.toggle):
+                if (isTracking) {
 
-                // create our polyline
-                track = map.addPolyline(new PolylineOptions().width(5).color(Color.RED));
-            }
+                    // stop recording
+                    stopTrackingService();
+                    isTracking = false;
+                    item.setIcon(R.drawable.ic_play_black);
+                } else {
+
+                    // start recording
+                    startTrackingService();
+                    isTracking = true;
+                    item.setIcon(R.drawable.ic_pause_black);
+
+                    // create our polyline
+                    track = map.addPolyline(new PolylineOptions().width(5).color(Color.RED));
+                }
+                break;
         }
 
         // update the menu
@@ -142,7 +150,8 @@ public class MapsActivity extends FragmentActivity implements
      */
     public void startTrackingService() {
         // register broadcast receiver
-        registerReceiver(new BroadcastReceiver() {
+        LocalBroadcastManager broadcastManager = LocalBroadcastManager.getInstance(getApplicationContext());
+        broadcastManager.registerReceiver(new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     if (intent.getAction().equals(getString(R.string.broadcast_name))) {
@@ -157,12 +166,12 @@ public class MapsActivity extends FragmentActivity implements
             }, new IntentFilter(getString(R.string.broadcast_name)));
 
         // start service
-        Intent trackingService = new Intent(getBaseContext(), StriveService.class);
+        Intent trackingService = new Intent(getApplicationContext(), StriveService.class);
         startService(trackingService);
     }
 
     public void stopTrackingService() {
-        Intent trackingService = new Intent(getBaseContext(), StriveService.class);
+        Intent trackingService = new Intent(getApplicationContext(), StriveService.class);
         stopService(trackingService);
     }
 
