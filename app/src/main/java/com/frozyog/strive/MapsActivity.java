@@ -1,12 +1,15 @@
 package com.frozyog.strive;
 
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.graphics.Color;
 import android.location.Location;
 import android.os.Bundle;
+import android.os.IBinder;
 import android.support.v4.app.FragmentActivity;
 import android.support.v4.content.LocalBroadcastManager;
 import android.util.Log;
@@ -18,10 +21,6 @@ import android.widget.Toast;
 
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GooglePlayServicesUtil;
-import com.google.android.gms.common.api.GoogleApiClient;
-import com.google.android.gms.location.LocationListener;
-import com.google.android.gms.location.LocationRequest;
-import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.MapFragment;
@@ -34,30 +33,18 @@ import java.text.NumberFormat;
 import java.util.List;
 
 public class MapsActivity extends FragmentActivity implements
-        GoogleApiClient.ConnectionCallbacks,
-        GoogleApiClient.OnConnectionFailedListener,
         GoogleMap.OnMyLocationButtonClickListener,
-        LocationListener,
         OnMapReadyCallback {
-
-    private GoogleApiClient mGoogleApiClient;
-
-    private LocalBroadcastManager mLocalBroadcastManager;
-    private BroadcastReceiver mReceiver;
-    static final String ACTION_UPDATE = "com.example.android.supportv4.UPDATE";
 
     private GoogleMap map;
     private Polyline track;
     private double distance = 0.0;
-    private Location lastLocation;
+    private Location location;
     private boolean isTracking = false;
 
-    private final int ZOOM = 15;   // map's zoom
-
-    private final double MIN_ACCURACY        = 10;   // min accuracy to start accepting lcoation updates, in m
-    private final double MIN_DISTANCE        = 10;   // min distance to pan the map's view, in m
-    private final long   UPDATE_INTERVAL     = 3000; // min time to ask for new updates, in ms
-    private final float  UPDATE_MIN_DISTANCE = 3;    // min distance to ask for location updates, in m
+    private final int ZOOM = 15;        // map's zoom
+    private final double MIN_ACCURACY   = 15;   // min accuracy to start accepting lcoation updates, in m
+    private final double MIN_DISTANCE   = 10;   // min distance to pan the map's view, in m
 
 
 
@@ -73,11 +60,8 @@ public class MapsActivity extends FragmentActivity implements
 
         // check for google play services
         if (servicesAvailable()) {
-            // build the client
-            mGoogleApiClient = new GoogleApiClient.Builder(this)
-                    .addApi(LocationServices.API)
-                    .addConnectionCallbacks(this)
-                    .build();
+            // create the service and ask for our first update
+            startStriveService();
         } else {
             // finish the app, the user should now be prompted for gms install
             finish();
@@ -87,21 +71,22 @@ public class MapsActivity extends FragmentActivity implements
     @Override
     protected void onResume() {
         super.onStart();
-
+        // TODO when tapping on the notification, our activity is being restarted
         // TODO if activity was killed but service is still running, should update UI
-
-        // connect the client
-        mGoogleApiClient.connect();
+        // TODO make sure isTracking flag survives app's dismisal
     }
 
     @Override
-    protected void onPause() {
-        // disconnect the client
-        mGoogleApiClient.disconnect();
+    protected void onDestroy() {
+        // unregister receiver
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(mBroadcastReceiver);
 
-        // TODO should unregisterReceiver?
+        // stop and unbind service if we're not recording anything
+        if (!isTracking) {
+            stopStriveService();
+        }
 
-        super.onPause();
+        super.onDestroy();
     }
 
 
@@ -123,13 +108,13 @@ public class MapsActivity extends FragmentActivity implements
                 if (isTracking) {
 
                     // stop recording
-                    stopTrackingService();
+                    stopTrackingFromService();
                     isTracking = false;
                     item.setIcon(R.drawable.ic_play_black);
                 } else {
 
                     // start recording
-                    startTrackingService();
+                    startTrackingFromService();
                     isTracking = true;
                     item.setIcon(R.drawable.ic_pause_black);
 
@@ -148,81 +133,115 @@ public class MapsActivity extends FragmentActivity implements
     /**
      *      SERVICE METHODS
      */
-    public void startTrackingService() {
-        // register broadcast receiver
-        LocalBroadcastManager broadcastManager = LocalBroadcastManager.getInstance(getApplicationContext());
-        broadcastManager.registerReceiver(new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    if (intent.getAction().equals(getString(R.string.broadcast_name))) {
-                        // TODO support Parcelable http://stackoverflow.com/questions/20121159/how-to-serialize-for-android-location-class
-                        double lat   = intent.getDoubleExtra("lat",  0);
-                        double lng   = intent.getDoubleExtra("lng",  0);
-                        float  delta = intent.getFloatExtra("delta", 0);
-                        Log.d("MapsActivity", "Received location update: " + lat + ", " + lng);
-                        updateLocationFromService(new LatLng(lat, lng), delta);
-                    }
-                }
-            }, new IntentFilter(getString(R.string.broadcast_name)));
+    public void startTrackingFromService() {
+        // prevent distance (deltea) to be added when restarting tracking
+        this.location = null;
 
-        // start service
+        if (mIsBound) {
+            mBoundStriveService.startTracking();
+        }
+    }
+
+    public void stopTrackingFromService() {
+        if (mIsBound) {
+            mBoundStriveService.stopTracking();
+        }
+    }
+
+    public void startStriveService() {
+        Log.d("MapsActivity", "startStriveService()");
+
+        // register broadcast receiver for service
+        LocalBroadcastManager.getInstance(this).registerReceiver(mBroadcastReceiver,
+                new IntentFilter(getString(R.string.broadcast_name)));
+
+        // actually start the service
         Intent trackingService = new Intent(getApplicationContext(), StriveService.class);
         startService(trackingService);
+
+        // bind to the service
+        doBindService();
     }
 
-    public void stopTrackingService() {
+    public void stopStriveService() {
         Intent trackingService = new Intent(getApplicationContext(), StriveService.class);
         stopService(trackingService);
+
+        // unbind to the service
+        doUnbindService();
     }
+
+    private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent.getAction().equals(getString(R.string.broadcast_name))) {
+//                Log.d("MapsActivity", "Received location update.");
+                // TODO support Parcelable http://stackoverflow.com/questions/20121159/how-to-serialize-for-android-location-class
+
+                // build a Location object
+                Location location = new Location(getString(R.string.broadcast_name));
+                location.setLatitude(intent.getDoubleExtra("lat", 0));
+                location.setLongitude(intent.getDoubleExtra("lng", 0));
+                location.setAccuracy(intent.getFloatExtra("accuracy", -1)); // could induce bugs
+
+                // update location
+                updateLocationFromService(location);
+            }
+        }
+    };
 
 
 
     /**
      *      LOCATION METHODS
      */
-    protected void updateLocationFromService(LatLng latLng, float delta) {
-        // draw on the map
-        List<LatLng> points = track.getPoints();
-        points.add(latLng);
-        track.setPoints(points);
+    protected void updateLocationFromService(Location location) {
+//        Log.d("MapsActivity", "Processing location update.");
 
-        // set the number format
-        NumberFormat formatter = NumberFormat.getNumberInstance();
-        formatter.setMinimumFractionDigits(2);
-        formatter.setMaximumFractionDigits(2);
-
-        // update the distance
-        distance += delta;
-        TextView txtDistance = (TextView) findViewById(R.id.txtDistance);
-        txtDistance.setText(formatter.format(distance/1000) + " km.");
-
-        // only move the camera if the distance is farther than MIN_DISTANCE
-        // TODO disable auto movement if the user's interacting with the map
-        if (delta > MIN_DISTANCE) {
-            map.moveCamera(CameraUpdateFactory.newLatLng(latLng));
+        // compute distance to last location update
+        float delta = 0;
+        if (this.location != null) {
+            delta = this.location.distanceTo(location);
         }
-    }
 
-    @Override
-    public void onLocationChanged(Location location) {
-        Log.d("MapsActivity", "onLocationChanged()");
-
-        // save the Location
-        this.lastLocation = location;
-
-        // build our new latLng
+        // build a LatLng object
         LatLng latLng = new LatLng(location.getLatitude(), location.getLongitude());
-        map.moveCamera(CameraUpdateFactory.newLatLng(latLng));
 
-        // only consider location updates better than MIN_ACCURACY thresholds
-        if (location.getAccuracy() < MIN_ACCURACY) {
-            // remove location updates
-            Log.d("MapsActivity", "Accuracy is now " + location.getAccuracy() + ", removing location updates.");
-            LocationServices.FusedLocationApi.removeLocationUpdates(mGoogleApiClient, this);
+        if (isTracking) {
+            // draw on the map
+            List<LatLng> points = track.getPoints();
+            points.add(latLng);
+            track.setPoints(points);
 
-            // disconnect the client
-            mGoogleApiClient.disconnect();
+            // set the number format
+            NumberFormat formatter = NumberFormat.getNumberInstance();
+            formatter.setMinimumFractionDigits(2);
+            formatter.setMaximumFractionDigits(2);
+
+            // update the distance's TextView
+            distance += delta;
+            TextView txtDistance = (TextView) findViewById(R.id.txtDistance);
+            txtDistance.setText(formatter.format(distance / 1000) + " km.");
+
+            // only move the camera if the distance is farther than MIN_DISTANCE
+            // TODO disable auto movement if the user's interacting with the map
+            if (delta > MIN_DISTANCE) {
+                map.moveCamera(CameraUpdateFactory.newLatLng(latLng));
+            }
+        } else {
+            // update our map
+            map.moveCamera(CameraUpdateFactory.newLatLng(latLng));
+
+            // once get a good fix, we can stop listening for location updates
+            if (location.getAccuracy() < MIN_ACCURACY) {
+                Log.d("MapsActivity", "Accuracy is now " + location.getAccuracy() + "," +
+                        " removing location updates since we're not tracking.");
+                stopTrackingFromService();
+            }
         }
+
+        // update our app's last location
+        this.location = location;
     }
 
 
@@ -234,14 +253,13 @@ public class MapsActivity extends FragmentActivity implements
     public void onMapReady(GoogleMap map) {
         this.map = map;
 
-        // get our last location
-        lastLocation = LocationServices.FusedLocationApi.getLastLocation(mGoogleApiClient);
+        // update our map with the last ocation available (in case the background service is still connecting)
         LatLng latLng;
-        if (lastLocation != null) {
-            latLng = new LatLng(lastLocation.getLatitude(), lastLocation.getLongitude());
+        if (this.location == null) {
+            Log.d("MapsActivity", "onMapReady(): LastLocation was null, setting arbitrary point");
+            latLng = new LatLng(31, 116); // TODO set it to a more interesting spot
         } else {
-            Log.d("MapsActivity", "LastLocation was null, setting arbitrary point");
-            latLng = new LatLng(31, 116);
+            latLng = new LatLng(this.location.getLatitude(), this.location.getLongitude());
         }
 
         // map configuration
@@ -253,13 +271,13 @@ public class MapsActivity extends FragmentActivity implements
 
     @Override
     public boolean onMyLocationButtonClick() {
-        // move our Map's Camera where due
-        if (lastLocation == null) {
+        // move our Map's Camera when due
+        if (this.location == null) {
             Log.d("MapsActivity", "LastLocation was null, should wait for location update");
             Toast.makeText(getBaseContext(), getString(R.string.location_waiting), Toast.LENGTH_SHORT).show();
         } else {
             Log.d("MapsActivity", "Moving map to LastLocation");
-            LatLng latLng = new LatLng(lastLocation .getLatitude(), lastLocation .getLongitude());
+            LatLng latLng = new LatLng(this.location.getLatitude(), this.location.getLongitude());
             map.moveCamera(CameraUpdateFactory.newLatLng(latLng));
         }
 
@@ -271,25 +289,33 @@ public class MapsActivity extends FragmentActivity implements
     /**
      *      SERVICES METHODS
      */
-    @Override
-    public void onConnected(Bundle dataBundle) {
-        // start location updates
-        LocationRequest mLocationRequest = LocationRequest.create();
-        mLocationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
-        mLocationRequest.setInterval(UPDATE_INTERVAL);
-        mLocationRequest.setSmallestDisplacement(UPDATE_MIN_DISTANCE);
-        LocationServices.FusedLocationApi.requestLocationUpdates(
-                mGoogleApiClient, mLocationRequest, this);
+    private boolean mIsBound;
+    private StriveService mBoundStriveService;
+
+    private ServiceConnection mConnection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName className, IBinder service) {
+            Log.d("MapsActivity", "Service has been bound");
+            mBoundStriveService = ((StriveService.LocalBinder) service).getService();
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName componentName) {
+            mBoundStriveService = null;
+        }
+    };
+
+    void doBindService() {
+        bindService(new Intent(this, StriveService.class),
+                mConnection, Context.BIND_AUTO_CREATE);
+        mIsBound = true;
     }
 
-    @Override
-    public void onConnectionSuspended(int i) {
-        Toast.makeText(this, "Connection has been suspended", Toast.LENGTH_SHORT).show();
-    }
-
-    @Override
-    public void onConnectionFailed(ConnectionResult connectionResult) {
-        Toast.makeText(this, "Connection has failed", Toast.LENGTH_SHORT).show();
+    void doUnbindService() {
+        if (mIsBound) {
+            unbindService(mConnection);
+            mIsBound = false;
+        }
     }
 
     private boolean servicesAvailable() {

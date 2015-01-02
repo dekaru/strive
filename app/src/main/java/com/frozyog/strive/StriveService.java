@@ -4,9 +4,11 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.location.Location;
+import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.support.v4.app.NotificationCompat;
+import android.support.v4.content.LocalBroadcastManager;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -20,12 +22,27 @@ public class StriveService extends Service implements
         GoogleApiClient.ConnectionCallbacks,
         GoogleApiClient.OnConnectionFailedListener {
 
+    private boolean isTracking = false;
     private GoogleApiClient mGoogleApiClient;
-
     private final long   UPDATE_INTERVAL     = 3000; // min time to ask for new updates, in ms
-    private final float  UPDATE_MIN_DISTANCE = 3;    // min distance to ask for location updates, in m
+    private final float  UPDATE_MIN_DISTANCE = 0;    // min distance to ask for location updates, in m
+    private final int    NOTIFICATION_ID = 655321;   // min distance to ask for location updates, in m
 
-    public StriveService() { }
+
+
+    public StriveService() {}
+
+    public class LocalBinder extends Binder {
+        StriveService getService() {
+            return StriveService.this;
+        }
+    }
+
+    private final IBinder mBinder = new LocalBinder();
+
+    public IBinder onBind(Intent intent) {
+        return mBinder;
+    }
 
 
 
@@ -54,12 +71,6 @@ public class StriveService extends Service implements
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        // TODO: Return the communication channel to the service.
-        throw new UnsupportedOperationException("Not yet implemented");
-    }
-
-    @Override
     public void onDestroy() {
         // disconnect client
         mGoogleApiClient.disconnect();
@@ -74,29 +85,28 @@ public class StriveService extends Service implements
      */
     @Override
     public void onConnected(Bundle dataBundle) {
-        // start service with notification on the foreground
-        NotificationCompat.Builder mBuilder = new NotificationCompat.Builder(this)
-                .setSmallIcon(R.drawable.ic_launcher)
-                .setContentTitle(getString(R.string.app_name))
-                .setContentText(getString(R.string.tracking));
-        Intent notificationIntent   = new Intent(this, MapsActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0);
-        mBuilder.setContentIntent(pendingIntent);
+        Log.d("StriveService", "onConnected()");
 
-        startForeground(1, mBuilder.build());
+        // start location updates for initial location update
+        registerLocationUpdates();
 
-        // start location updates
-        LocationRequest mLocationRequest = LocationRequest.create();
-        mLocationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
-        mLocationRequest.setInterval(UPDATE_INTERVAL);
-        mLocationRequest.setSmallestDisplacement(UPDATE_MIN_DISTANCE);
-        LocationServices.FusedLocationApi.requestLocationUpdates(
-                mGoogleApiClient, mLocationRequest, new MyLocationListener());
+        if (isTracking) {
+            // start service with notification on the foreground
+            NotificationCompat.Builder mBuilder = new NotificationCompat.Builder(this)
+                    .setSmallIcon(R.drawable.ic_launcher)
+                    .setContentTitle(getString(R.string.app_name))
+                    .setContentText(getString(R.string.tracking));
+            Intent notificationIntent   = new Intent(this, MapsActivity.class);
+            PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0);
+            mBuilder.setContentIntent(pendingIntent);
+            startForeground(NOTIFICATION_ID, mBuilder.build());
+        }
     }
 
     @Override
     public void onConnectionSuspended(int i) {
         // TODO show dialog stating it's impossible to track gps
+        // TODO recover if isTracking=true
         Log.w("StriveService", "onConnectionSuspended: " + i);
         Toast.makeText(this, "Connection has been suspended", Toast.LENGTH_SHORT).show();
     }
@@ -104,8 +114,33 @@ public class StriveService extends Service implements
     @Override
     public void onConnectionFailed(ConnectionResult connectionResult) {
         // TODO show dialog stating it's impossible to track gps
+        // TODO recover if isTracking=true
         Log.e("StriveService", "onConnectionFailed: " + connectionResult);
         Toast.makeText(this, "Connection has failed", Toast.LENGTH_SHORT).show();
+    }
+
+    public void startTracking() {
+        Log.d("StriveService", "startTracking()");
+
+        isTracking = true;
+
+        // start listening for location updates
+        mGoogleApiClient.connect();
+    }
+
+    public void stopTracking() {
+        Log.d("StriveService", "stopTracking()");
+
+        isTracking = false;
+
+        // hide notification
+        stopForeground(true);
+
+        // unregister location updates
+        LocationServices.FusedLocationApi.removeLocationUpdates(mGoogleApiClient, mLocationListener);
+
+        // disconnect client
+        mGoogleApiClient.disconnect();
     }
 
 
@@ -113,33 +148,30 @@ public class StriveService extends Service implements
     /**
      *      LOCATION LISTENER CLASS
      */
-    public class MyLocationListener implements LocationListener {
+    private MyLocationListener mLocationListener;
 
-        private Location location;
-        private final double MIN_ACCURACY = 10;   // min accuracy to start accepting lcoation updates, in m
+    public void registerLocationUpdates() {
+        mLocationListener = new MyLocationListener();
+        LocationRequest mLocationRequest = LocationRequest.create();
+        mLocationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+        mLocationRequest.setInterval(UPDATE_INTERVAL);
+        mLocationRequest.setSmallestDisplacement(UPDATE_MIN_DISTANCE);
+        LocationServices.FusedLocationApi.requestLocationUpdates(
+                mGoogleApiClient, mLocationRequest, mLocationListener);
+    }
+
+    public class MyLocationListener implements LocationListener {
 
         @Override
         public void onLocationChanged(Location location) {
             Log.i("StriveService", "Location updated with accuracy " + location.getAccuracy());
-            // only consider location updates better than MIN_ACCURACY thresholds
-            if (location.getAccuracy() < MIN_ACCURACY) {
 
-                // measure the distance of update to previous location
-                float delta = 0;
-                if (this.location != null) {
-                    delta = this.location.distanceTo(location);
-                }
-
-                // send the broadcast message
-                Intent update = new Intent(getString(R.string.broadcast_name));
-                update.putExtra("lat",   location.getLatitude());
-                update.putExtra("lng",   location.getLongitude());
-                update.putExtra("delta", delta);
-                sendBroadcast(update);
-
-                // update our location
-                this.location = location;
-            }
+            // send the broadcast message
+            Intent update = new Intent(getString(R.string.broadcast_name));
+            update.putExtra("lat",   location.getLatitude());
+            update.putExtra("lng",   location.getLongitude());
+            update.putExtra("accuracy", location.getAccuracy());
+            LocalBroadcastManager.getInstance(getApplicationContext()).sendBroadcast(update);
         }
     }
 }
